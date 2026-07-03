@@ -1,6 +1,6 @@
 {
   "name": "acme-orders",
-  "version": "1.4.0",
+  "version": "1.4.2",
   "description": "ACME Commerce \u2014 order processing platform",
   "private": true,
   "scripts": {
