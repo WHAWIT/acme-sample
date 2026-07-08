@@ -11,6 +11,7 @@ import { OrderRepository } from './order.repository';
 import { OrderPipelineService } from './order-pipeline.service';
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
+import { StuckOrderSweeper } from './stuck-order.sweeper';
 
 @Module({
   imports: [
@@ -23,7 +24,7 @@ import { OrdersController } from './orders.controller';
     InfraModule,
   ],
   controllers: [OrdersController],
-  providers: [IdempotencyStore, OrderRepository, OrderPipelineService, OrdersService],
+  providers: [IdempotencyStore, OrderRepository, OrderPipelineService, OrdersService, StuckOrderSweeper],
   exports: [OrdersService, OrderRepository],
 })
 export class OrdersModule {}

@@ -30,6 +30,10 @@ const PROMOTIONS: Promotion[] = [
     rules: { tiers: [{ minSubtotal: 500, rate: 0.2 }, { minSubtotal: 0, rate: 0.12 }] },
   },
   { code: 'SUMMER25', percentOff: 25, expiresAt: new Date('2026-09-30T23:59:59Z') },
+  {
+    code: 'SUMMER24', percentOff: 25, expiresAt: new Date('2024-09-30T23:59:59Z'),
+    rules: { tiers: [{ minSubtotal: 0, rate: 0.25 }] },
+  },
 ];
 
 @Injectable()

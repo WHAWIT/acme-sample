@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { createLogger } from '../common/logger';
 import { FailureCode, OrderProcessingError } from '../domain/failure-codes';
 import { ScenarioEngine } from '../scenarios/scenario.engine';
+import {
+  INSUFFICIENT_FUNDS_BIN,
+  INSUFFICIENT_FUNDS_DECLINE_RATE,
+} from '../scenarios/scenario-inputs';
 import { simConfig } from '../simulation/sim-config';
 
 const log = createLogger('payment-gateway');
@@ -20,6 +24,25 @@ export class PaymentGatewaySim {
 
   async capture(amountCents: number): Promise<{ authCode: string }> {
     return this.roundTrip('capture', amountCents);
+  }
+
+  /**
+   * Issuer-side decline advisory for the funds wave: during the scenario the
+   * one affected BIN starts declining most authorizations for insufficient
+   * funds. Reading the engine here keeps the rate change in the sim layer.
+   */
+  insufficientFundsDecline(cardBin: string): boolean {
+    if (!this.engine.isActive('insufficient-funds-wave')) return false;
+    if (cardBin !== INSUFFICIENT_FUNDS_BIN) return false;
+    return Math.random() < INSUFFICIENT_FUNDS_DECLINE_RATE;
+  }
+
+  /**
+   * While the webhook scenario is active the gateway authorizes but stops
+   * delivering capture confirmations, leaving captured orders un-settled.
+   */
+  captureConfirmationHeld(): boolean {
+    return this.engine.isActive('stuck-orders-webhook');
   }
 
   private async roundTrip(op: string, amountCents: number): Promise<{ authCode: string }> {

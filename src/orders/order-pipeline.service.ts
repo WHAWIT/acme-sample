@@ -3,6 +3,7 @@ import { createLogger } from '../common/logger';
 import { FailureCode, OrderProcessingError } from '../domain/failure-codes';
 import { Order, OrderState, TERMINAL_STATES } from '../domain/order.entity';
 import { assertTransition, canTransition } from '../domain/order-state.machine';
+import { CHARGEBACK_REASON, isCustomerBlocked } from '../domain/customer-blacklist';
 import { CatalogService } from '../catalog/catalog.service';
 import { SkuValidator } from '../catalog/sku.validator';
 import { PricingService } from '../pricing/pricing.service';
@@ -31,6 +32,11 @@ const FRAUD_HOLD_THRESHOLD = 0.85;
 const BACKORDER_MAX_ATTEMPTS = 3;
 const BACKORDER_RETRY_MIN_MS = 10_000;
 const BACKORDER_RETRY_MAX_MS = 30_000;
+// Payment capture is confirmed by the gateway out of band (webhook). When the
+// confirmation is delayed the order waits in FULFILLING and we poll again;
+// after enough misses it dead-letters instead of hanging forever.
+const CAPTURE_CONFIRM_MAX_ATTEMPTS = 20;
+const CAPTURE_CONFIRM_RETRY_MS = Number(process.env.STUCK_CAPTURE_RETRY_MS || 20_000);
 
 const GATEWAY_FAILURE_CODES = new Set<FailureCode>([
   FailureCode.GatewayBadGateway,
@@ -89,6 +95,10 @@ export class OrderPipelineService {
         latencyMs: Date.now() - stepStartedAt,
         amount: order.total,
         sku: order.lines.map((l) => l.sku),
+        channel: order.channel,
+        appVersion: order.appVersion,
+        cardBin: order.cardBin,
+        issuer: order.issuer,
       },
       `Order ${order.id} ${prev} -> ${to}`,
     );
@@ -97,6 +107,39 @@ export class OrderPipelineService {
   private async validateStep(order: Order): Promise<void> {
     const started = Date.now();
     await sleep(20 + Math.random() * 80);
+
+    if (!order.shippingAddress?.zip) {
+      log.warn(
+        {
+          event: 'order_rejected',
+          errorCode: FailureCode.MissingShippingZip,
+          orderId: order.id,
+          customerId: order.customerId,
+          channel: order.channel,
+          appVersion: order.appVersion,
+        },
+        `Order ${order.id} rejected: shipping address is missing a postal code`,
+      );
+      this.transition(order, OrderState.Rejected, started, 'missing shipping zip');
+      return;
+    }
+
+    if (isCustomerBlocked(order.customerId)) {
+      log.warn(
+        {
+          event: 'order_rejected',
+          errorCode: FailureCode.CustomerBlocked,
+          orderId: order.id,
+          customerId: order.customerId,
+          channel: order.channel,
+          reason: CHARGEBACK_REASON,
+        },
+        `Order ${order.id} rejected: customer ${order.customerId} is blocked (${CHARGEBACK_REASON})`,
+      );
+      this.transition(order, OrderState.Rejected, started, `customer blocked: ${CHARGEBACK_REASON}`);
+      return;
+    }
+
     for (const line of order.lines) {
       if (!SkuValidator.isValid(line.sku) || !this.catalog.getProduct(line.sku)) {
         log.warn(
@@ -134,6 +177,8 @@ export class OrderPipelineService {
             orderId: order.id,
             customerId: order.customerId,
             promoCode: order.promoCode,
+            channel: order.channel,
+            appVersion: order.appVersion,
           },
           `Promo code ${order.promoCode} expired; repricing order ${order.id} without promo`,
         );
@@ -216,6 +261,10 @@ export class OrderPipelineService {
               customerId: order.customerId,
               amount: order.total,
               attempts: order.paymentAttempts,
+              channel: order.channel,
+              appVersion: order.appVersion,
+              cardBin: order.cardBin,
+              issuer: order.issuer,
             },
             `Payment declined for order ${order.id} after ${order.paymentAttempts} attempts`,
           );
@@ -297,6 +346,8 @@ export class OrderPipelineService {
           customerId: order.customerId,
           fraudScore: score,
           amount: order.total,
+          channel: order.channel,
+          appVersion: order.appVersion,
         },
         `Order ${order.id} placed on fraud hold (score ${score.toFixed(2)})`,
       );
@@ -370,9 +421,12 @@ export class OrderPipelineService {
               event: 'order_backordered',
               errorCode: FailureCode.InsufficientStock,
               orderId: order.id,
+              customerId: order.customerId,
               warehouse: order.warehouse,
               attempt: order.allocationAttempts,
               sku: order.lines.map((l) => l.sku),
+              channel: order.channel,
+              appVersion: order.appVersion,
             },
             `Insufficient stock for order ${order.id}; moved to backorder`,
           );
@@ -405,8 +459,42 @@ export class OrderPipelineService {
     const started = Date.now();
     await sleep(50 + Math.random() * 200);
     this.transition(order, OrderState.Fulfilling, started);
+    const outcome = await this.attemptCapture(order);
+    if (outcome === 'pending') {
+      this.scheduleCaptureConfirmation(order);
+      return;
+    }
+    this.queue(order, () => this.shipStep(order));
+  }
+
+  /**
+   * Re-poll a capture whose gateway confirmation was still outstanding. The
+   * order stays in FULFILLING (no transition, so its updatedAt does not move
+   * and the stuck-order sweeper keeps ageing it) until the webhook lands or
+   * the attempt budget is exhausted.
+   */
+  private async confirmCaptureStep(order: Order): Promise<void> {
+    const outcome = await this.attemptCapture(order);
+    if (outcome === 'pending') {
+      this.scheduleCaptureConfirmation(order);
+      return;
+    }
+    log.info(
+      {
+        event: 'capture_confirmation_recovered',
+        orderId: order.id,
+        customerId: order.customerId,
+        attempts: order.captureAttempts,
+      },
+      `Capture confirmation arrived for order ${order.id} after ${order.captureAttempts} attempts`,
+    );
+    this.queue(order, () => this.shipStep(order));
+  }
+
+  private async attemptCapture(order: Order): Promise<'captured' | 'pending'> {
     try {
       await this.payments.capture(order);
+      return 'captured';
     } catch (err) {
       if (err instanceof OrderProcessingError && err.code === FailureCode.AmountMismatch) {
         // The payment client has already logged the mismatch with both
@@ -422,11 +510,57 @@ export class OrderPipelineService {
           },
           `Capture for order ${order.id} reconciled to ${order.total}`,
         );
-      } else {
-        throw err;
+        return 'captured';
       }
+      if (err instanceof OrderProcessingError && err.code === FailureCode.CapturePending) {
+        return 'pending';
+      }
+      throw err;
     }
-    this.queue(order, () => this.shipStep(order));
+  }
+
+  private scheduleCaptureConfirmation(order: Order): void {
+    order.captureAttempts += 1;
+    if (order.captureAttempts >= CAPTURE_CONFIRM_MAX_ATTEMPTS) {
+      log.error(
+        {
+          event: 'order_processing_failed',
+          errorCode: FailureCode.PaymentConfirmationTimeout,
+          orderId: order.id,
+          customerId: order.customerId,
+          state: order.state,
+          amount: order.total,
+          attempts: order.captureAttempts,
+        },
+        `Capture confirmation never arrived for order ${order.id} after ${order.captureAttempts} attempts`,
+      );
+      this.transition(order, OrderState.Failed, Date.now(), 'payment capture confirmation timed out');
+      log.error(
+        {
+          event: 'order_dead_lettered',
+          errorCode: FailureCode.PaymentConfirmationTimeout,
+          orderId: order.id,
+          customerId: order.customerId,
+          queue: 'orders.capture.dlq',
+          attempts: order.captureAttempts,
+        },
+        `Order ${order.id} dead-lettered after exhausting capture confirmation retries`,
+      );
+      return;
+    }
+    log.debug(
+      {
+        event: 'capture_confirmation_pending',
+        orderId: order.id,
+        customerId: order.customerId,
+        state: order.state,
+        attempt: order.captureAttempts,
+      },
+      `Awaiting gateway capture confirmation for order ${order.id} (attempt ${order.captureAttempts})`,
+    );
+    // Persist the incremented attempt count without moving updatedAt.
+    this.repository.save(order);
+    this.queue(order, () => this.confirmCaptureStep(order), CAPTURE_CONFIRM_RETRY_MS + Math.random() * 2_000);
   }
 
   private async shipStep(order: Order): Promise<void> {
@@ -507,6 +641,10 @@ export class OrderPipelineService {
         prevState: prev,
         amount: order.total,
         sku: order.lines.map((l) => l.sku),
+        channel: order.channel,
+        appVersion: order.appVersion,
+        cardBin: order.cardBin,
+        issuer: order.issuer,
       },
       `Order ${order.id} ${prev} -> ${OrderState.Failed}`,
     );

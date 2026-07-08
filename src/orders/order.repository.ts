@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Order, TERMINAL_STATES } from '../domain/order.entity';
+import { Order, OrderState, TERMINAL_STATES } from '../domain/order.entity';
 import { DbPool } from '../infra/db-pool';
 
 /**
@@ -58,6 +58,17 @@ export class OrderRepository {
       if (!TERMINAL_STATES.has(order.state)) count += 1;
     }
     return count;
+  }
+
+  /** In-flight orders (not terminal, not dead-lettered); used by the stuck-order sweeper. */
+  activeInPipeline(): Order[] {
+    const orders: Order[] = [];
+    for (const order of this.byId.values()) {
+      if (!TERMINAL_STATES.has(order.state) && order.state !== OrderState.Failed) {
+        orders.push(order);
+      }
+    }
+    return orders;
   }
 
   countsByState(): Record<string, number> {

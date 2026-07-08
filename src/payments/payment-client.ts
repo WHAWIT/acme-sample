@@ -28,10 +28,18 @@ export class PaymentClient {
     if (Math.random() < 0.04) {
       const reason = DECLINE_REASONS[Math.floor(Math.random() * DECLINE_REASONS.length)];
       log.warn(
-        { event: 'payment_declined', orderId: order.id, customerId: order.customerId, reason, amount: order.total, errorCode: FailureCode.PaymentDeclined },
+        { event: 'payment_declined', orderId: order.id, customerId: order.customerId, reason, amount: order.total, channel: order.channel, appVersion: order.appVersion, cardBin: order.cardBin, issuer: order.issuer, errorCode: FailureCode.PaymentDeclined },
         `Payment declined for order ${order.id}: ${reason}`,
       );
       throw new OrderProcessingError(FailureCode.PaymentDeclined, `Payment declined: ${reason}`);
+    }
+    // Insufficient-funds wave: a single card BIN's issuer starts declining.
+    if (this.gateway.insufficientFundsDecline(order.cardBin)) {
+      log.warn(
+        { event: 'payment_declined', orderId: order.id, customerId: order.customerId, reason: 'insufficient_funds', amount: order.total, channel: order.channel, appVersion: order.appVersion, cardBin: order.cardBin, issuer: order.issuer, errorCode: FailureCode.PaymentDeclined },
+        `Payment declined for order ${order.id}: insufficient_funds (BIN ${order.cardBin}/${order.issuer})`,
+      );
+      throw new OrderProcessingError(FailureCode.PaymentDeclined, `Payment declined: insufficient_funds`);
     }
     if (order.b2b && Math.random() < 0.07) {
       log.warn(
@@ -52,6 +60,16 @@ export class PaymentClient {
   }
 
   async capture(order: Order): Promise<void> {
+    // The gateway may authorize but withhold capture confirmation (async
+    // settlement webhook). Signalled before the amount/breaker path so a held
+    // confirmation reads as "pending", not a gateway health failure.
+    if (this.gateway.captureConfirmationHeld()) {
+      throw new OrderProcessingError(
+        FailureCode.CapturePending,
+        `Capture confirmation pending from gateway for order ${order.id}`,
+        true,
+      );
+    }
     const expectedCents = TaxCalculator.totalCents(Math.round(order.subtotal * 100));
     if (expectedCents !== order.authorizedAmount) {
       const authorized = (order.authorizedAmount / 100).toFixed(2);

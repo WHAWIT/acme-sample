@@ -8,7 +8,13 @@ export type ScenarioName =
   | 'inventory-desync'
   | 'checkout-latency-spike'
   | 'duplicate-order-storm'
-  | 'payment-mismatch-spike';
+  | 'payment-mismatch-spike'
+  | 'checkout-missing-field'
+  | 'insufficient-funds-wave'
+  | 'expired-promo-flood'
+  | 'inventory-oversell'
+  | 'blocked-customer-retry-storm'
+  | 'stuck-orders-webhook';
 
 export interface ScenarioDefinition {
   name: ScenarioName;

@@ -1,8 +1,16 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import { ProductCache } from '../cache/product-cache';
 import { createLogger } from '../common/logger';
 import { OrderLine } from '../domain/order.entity';
 import { ScenarioEngine } from '../scenarios/scenario.engine';
+import {
+  HOT_SKUS,
+  OVERSELL_CACHE_ONHAND,
+  OVERSELL_LEDGER_FLOOR_MAX,
+  OVERSELL_LEDGER_FLOOR_MIN,
+  OVERSELL_RESTORE_ONHAND,
+  OVERSELL_SYNC_MS,
+} from './oversell-config';
 import { StockLedger } from './stock-allocator';
 
 const log = createLogger('inventory-service');
@@ -21,12 +29,49 @@ export interface AvailabilityResult {
 }
 
 @Injectable()
-export class InventoryService {
+export class InventoryService implements OnApplicationBootstrap {
+  private oversellActive = false;
+
   constructor(
     private readonly engine: ScenarioEngine,
     private readonly cache: ProductCache,
     private readonly ledger: StockLedger,
   ) {}
+
+  onApplicationBootstrap(): void {
+    // While inventory-oversell runs, hold the hot SKUs' true stock below the
+    // reservation ledger and keep serving an inflated availability figure to
+    // the cache the allocation gate reads. The gate clears orders the ledger
+    // cannot fulfil, so allocation surfaces real oversells and backorders.
+    const timer = setInterval(() => this.syncOversellState(), OVERSELL_SYNC_MS);
+    timer.unref?.();
+  }
+
+  private syncOversellState(): void {
+    const active = this.engine.isActive('inventory-oversell');
+    if (active) {
+      for (const sku of HOT_SKUS) {
+        const floor =
+          OVERSELL_LEDGER_FLOOR_MIN +
+          Math.floor(Math.random() * (OVERSELL_LEDGER_FLOOR_MAX - OVERSELL_LEDGER_FLOOR_MIN + 1));
+        this.ledger.set(sku, floor);
+        this.cache.set(`stock:${sku}`, { onHand: OVERSELL_CACHE_ONHAND, cachedAt: Date.now() });
+      }
+      this.oversellActive = true;
+      return;
+    }
+    if (this.oversellActive) {
+      // Scenario ended: replenish the hot SKUs back to a healthy level.
+      for (const sku of HOT_SKUS) {
+        this.ledger.set(sku, OVERSELL_RESTORE_ONHAND);
+      }
+      this.oversellActive = false;
+      log.info(
+        { event: 'stock_replenished', skus: HOT_SKUS, onHand: OVERSELL_RESTORE_ONHAND },
+        `Hot SKUs replenished to ${OVERSELL_RESTORE_ONHAND} after inventory-oversell ended`,
+      );
+    }
+  }
 
   async checkAvailability(lines: OrderLine[]): Promise<AvailabilityResult[]> {
     const started = Date.now();

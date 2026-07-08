@@ -7,7 +7,7 @@ import {
 import { createLogger } from '../common/logger';
 import { newOrderId } from '../common/ids';
 import { FailureCode, OrderProcessingError } from '../domain/failure-codes';
-import { Order, OrderState, TERMINAL_STATES } from '../domain/order.entity';
+import { Order, OrderChannel, OrderState, TERMINAL_STATES } from '../domain/order.entity';
 import { CatalogService } from '../catalog/catalog.service';
 import { PricingService } from '../pricing/pricing.service';
 import { InventoryService } from '../inventory/inventory.service';
@@ -25,9 +25,13 @@ export interface CreateOrderDto {
   customerId: string;
   customerName?: string;
   b2b?: boolean;
+  channel?: OrderChannel;
+  appVersion?: string;
+  cardBin?: string;
+  issuer?: string;
   lines: Array<{ sku: string; quantity: number }>;
   promoCode?: string;
-  shippingAddress?: { street: string; city: string; country: string; zip: string };
+  shippingAddress?: { street: string; city: string; country: string; zip?: string };
   warehouse?: string;
   currency?: string;
 }
@@ -157,6 +161,10 @@ export class OrdersService {
       customerId: dto.customerId,
       customerName: dto.customerName || 'Guest Customer',
       b2b: !!dto.b2b,
+      channel: dto.channel || 'web',
+      appVersion: dto.appVersion || 'unknown',
+      cardBin: dto.cardBin || '000000',
+      issuer: dto.issuer || 'Unknown',
       lines: (dto.lines || []).map((line) => ({
         sku: line.sku,
         quantity: line.quantity,
@@ -170,6 +178,7 @@ export class OrdersService {
       state: OrderState.Received,
       paymentAttempts: 0,
       allocationAttempts: 0,
+      captureAttempts: 0,
       createdAt: now,
       updatedAt: now,
       history: [],

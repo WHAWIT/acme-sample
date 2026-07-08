@@ -24,11 +24,19 @@ export interface OrderLine {
   unitPrice: number;
 }
 
+/** Origin of the checkout. A primary correlation dimension across logs. */
+export type OrderChannel = 'web' | 'mobile' | 'api';
+
 export interface Order {
   id: string;
   customerId: string;
   customerName: string;
   b2b: boolean;
+  /** Correlation dimensions carried on every failure log and state change. */
+  channel: OrderChannel;
+  appVersion: string;
+  cardBin: string;
+  issuer: string;
   lines: OrderLine[];
   currency: string;
   promoCode?: string;
@@ -36,7 +44,7 @@ export interface Order {
     street: string;
     city: string;
     country: string;
-    zip: string;
+    zip?: string;
   };
   warehouse: string;
   state: OrderState;
@@ -46,6 +54,7 @@ export interface Order {
   fraudScore?: number;
   paymentAttempts: number;
   allocationAttempts: number;
+  captureAttempts: number;
   idempotencyKey?: string;
   createdAt: Date;
   updatedAt: Date;

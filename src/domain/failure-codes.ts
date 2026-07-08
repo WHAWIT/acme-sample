@@ -16,6 +16,8 @@ export enum FailureCode {
   PastDeliveryDate = 'ERR_PAST_DELIVERY_DATE',
   AmountMismatch = 'ERR_AMOUNT_MISMATCH',
   DuplicateOrder = 'ERR_DUPLICATE_ORDER',
+  MissingShippingZip = 'ERR_MISSING_SHIPPING_ZIP',
+  CustomerBlocked = 'ERR_CUSTOMER_BLOCKED',
 
   // Infrastructure failures
   GatewayBadGateway = 'ERR_GATEWAY_502',
@@ -23,6 +25,8 @@ export enum FailureCode {
   CircuitOpen = 'ERR_CIRCUIT_OPEN',
   PoolTimeout = 'ERR_POOL_TIMEOUT',
   UpstreamTimeout = 'ERR_UPSTREAM_TIMEOUT',
+  CapturePending = 'ERR_CAPTURE_PENDING',
+  PaymentConfirmationTimeout = 'ERR_PAYMENT_CONFIRMATION_TIMEOUT',
 }
 
 export class OrderProcessingError extends Error {
