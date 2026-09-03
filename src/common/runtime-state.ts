@@ -3,7 +3,7 @@
  * (blue/green rollouts flip the label before instances recycle).
  */
 class RuntimeState {
-  private currentVersion = process.env.SERVICE_VERSION || '1.4.2';
+  private currentVersion = process.env.SERVICE_VERSION || '1.4.3';
 
   readonly instanceId = `acme-orders-${(process.env.K_REVISION || 'local')
     .split('-')

@@ -29,6 +29,8 @@ export type OrderChannel = 'web' | 'mobile' | 'api';
 
 export interface Order {
   id: string;
+  /** 128-bit trace id shared by every log line about this order. */
+  traceId: string;
   customerId: string;
   customerName: string;
   b2b: boolean;

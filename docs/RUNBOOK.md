@@ -5,7 +5,8 @@ Internal cheatsheet for driving the demo. **Do not share with prospects.**
 ## Service
 
 - Cloud Run: `acme-orders`, GCP project `whawit`, us-central1.
-- Baseline: ~5 orders/min (~7,200/day), ~30 storefront queries/min, baseline noise on.
+- Baseline: ~8 orders/min, ~6 storefront queries/min, baseline noise on. Healthy fast `GET`s log at DEBUG, so the INFO stream is order lifecycle + failures (~100 lines/min). Whawit's log query caps at ~888 newest rows per 20-minute window, so keep the rate modest during a demo or the deploy event falls out of the window.
+- Deploys: `deploy/deploy.sh` reports the release to Whawit as a change event (secret `acme-change-webhook-url`); `bad-deploy-npe` reports its simulated v1.5.0 release and the rollback the same way, so the incident timeline shows the change and the commit (`BAD_DEPLOY_SHA` picks which commit).
 - Logs: stdout JSON → Cloud Logging (`resource.labels.service_name="acme-orders"`).
 
 ## Admin API
@@ -55,7 +56,7 @@ curl -s -X POST -H "x-acme-admin-token: $TOKEN" -H 'content-type: application/js
 
 ## Correlation dimensions
 
-Every order now carries four correlation dimensions, propagated onto
+Every order carries a `traceId` (also emitted as `logging.googleapis.com/trace`) on every log line of its lifecycle, including the async pipeline hops, plus four business dimensions, propagated onto
 `order_state_changed` (the backbone) and the relevant failure logs
 (`order_rejected`, `payment_declined`, `fraud_hold`, `order_backordered`,
 `order_stuck_pending`):

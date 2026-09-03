@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { createLogger } from '../common/logger';
-import { FailureCode, OrderProcessingError } from '../domain/failure-codes';
+import { createLogger, errorFields } from '../common/logger';
+import { GatewayError, GatewayTimeoutError } from '../domain/infra-errors';
+import { FailureCode } from '../domain/failure-codes';
 import { ScenarioEngine } from '../scenarios/scenario.engine';
 import {
   INSUFFICIENT_FUNDS_BIN,
@@ -9,6 +10,7 @@ import {
 import { simConfig } from '../simulation/sim-config';
 
 const log = createLogger('payment-gateway');
+const GATEWAY = 'PayFlux';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -52,27 +54,33 @@ export class PaymentGatewaySim {
       const roll = Math.random();
       if (roll < 0.7) {
         await sleep(50 + Math.random() * 200);
-        log.error(
-          { event: 'gateway_error', op, status: 502, errorCode: FailureCode.GatewayBadGateway, latencyMs: Date.now() - started },
-          `Payment gateway returned HTTP 502 Bad Gateway (${op})`,
+        const latencyMs = Date.now() - started;
+        const err = new GatewayError(
+          `Payment gateway ${GATEWAY} returned HTTP 502 Bad Gateway for ${op} of ${(amountCents / 100).toFixed(2)} after ${latencyMs}ms (upstream acquirer unreachable)`,
+          { op, status: 502, acquirer: GATEWAY, latencyMs },
+          { cause: new Error('upstream connect error or disconnect/reset before headers. reset reason: connection failure') },
         );
-        throw new OrderProcessingError(FailureCode.GatewayBadGateway, 'Payment gateway returned HTTP 502 Bad Gateway', true);
+        log.error({ event: 'gateway_error', op, status: 502, gateway: GATEWAY, errorCode: FailureCode.GatewayBadGateway, latencyMs, ...errorFields(err) }, err.message);
+        throw err;
       }
       if (roll < 0.9) {
         await sleep(10_000);
-        log.error(
-          { event: 'gateway_timeout', op, errorCode: FailureCode.GatewayTimeout, latencyMs: Date.now() - started },
-          `Payment gateway request timed out after 10000ms (ETIMEDOUT)`,
+        const err = new GatewayTimeoutError(
+          `Payment gateway ${GATEWAY} did not answer the ${op} of ${(amountCents / 100).toFixed(2)} within 10000ms (ETIMEDOUT)`,
+          { op, timeoutMs: 10_000, acquirer: GATEWAY },
         );
-        throw new OrderProcessingError(FailureCode.GatewayTimeout, 'Payment gateway request timed out after 10000ms (ETIMEDOUT)', true);
+        log.error({ event: 'gateway_timeout', op, gateway: GATEWAY, errorCode: FailureCode.GatewayTimeout, latencyMs: Date.now() - started, ...errorFields(err) }, err.message);
+        throw err;
       }
     } else if (simConfig.baselineNoise && Math.random() < 0.002) {
       await sleep(80 + Math.random() * 300);
-      log.error(
-        { event: 'gateway_error', op, status: 502, errorCode: FailureCode.GatewayBadGateway, latencyMs: Date.now() - started },
-        `Payment gateway returned HTTP 502 Bad Gateway (${op})`,
+      const latencyMs = Date.now() - started;
+      const err = new GatewayError(
+        `Payment gateway ${GATEWAY} returned HTTP 502 Bad Gateway for ${op} of ${(amountCents / 100).toFixed(2)} after ${latencyMs}ms`,
+        { op, status: 502, acquirer: GATEWAY, latencyMs },
       );
-      throw new OrderProcessingError(FailureCode.GatewayBadGateway, 'Payment gateway returned HTTP 502 Bad Gateway', true);
+      log.error({ event: 'gateway_error', op, status: 502, gateway: GATEWAY, errorCode: FailureCode.GatewayBadGateway, latencyMs, ...errorFields(err) }, err.message);
+      throw err;
     }
 
     await sleep(80 + Math.random() * 320);

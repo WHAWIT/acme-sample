@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { createLogger } from '../common/logger';
+import { createLogger, errorFields } from '../common/logger';
 import { FailureCode, OrderProcessingError } from '../domain/failure-codes';
+import { PoolTimeoutError } from '../domain/infra-errors';
 
 const log = createLogger('db-pool');
 
@@ -19,6 +20,7 @@ interface Waiter {
   resolve: (conn: PoolConnection) => void;
   reject: (err: Error) => void;
   timer: NodeJS.Timeout;
+  statement?: string;
 }
 
 /**
@@ -30,7 +32,7 @@ interface Waiter {
 export class DbPool {
   private readonly free: PoolConnection[] = [];
   private readonly waiters: Waiter[] = [];
-  private readonly checkedOut = new Map<number, { conn: PoolConnection; since: number }>();
+  private readonly checkedOut = new Map<number, { conn: PoolConnection; since: number; statement?: string }>();
   private inUse = 0;
   private lastPressureLogAt = 0;
 
@@ -53,7 +55,7 @@ export class DbPool {
     rowProvider: () => any[],
   ): Promise<any[]> {
     const startedAt = Date.now();
-    const conn = await this.acquire();
+    const conn = await this.acquire(sql);
     await conn.query(sql, params);
     const data = rowProvider();
     const latencyMs = Date.now() - startedAt;
@@ -72,11 +74,11 @@ export class DbPool {
   }
 
   /** Checks out a connection, waiting up to 5s for one to free up. */
-  acquire(): Promise<PoolConnection> {
+  acquire(statement?: string): Promise<PoolConnection> {
     const conn = this.free.pop();
     if (conn) {
       this.inUse++;
-      this.checkedOut.set(conn.id, { conn, since: Date.now() });
+      this.checkedOut.set(conn.id, { conn, since: Date.now(), statement });
       this.checkPressure();
       return Promise.resolve(conn);
     }
@@ -84,6 +86,7 @@ export class DbPool {
       const waiter: Waiter = {
         resolve,
         reject,
+        statement,
         timer: setTimeout(() => this.expireWaiter(waiter), ACQUIRE_TIMEOUT_MS),
       };
       this.waiters.push(waiter);
@@ -126,11 +129,11 @@ export class DbPool {
     const idx = this.waiters.indexOf(waiter);
     if (idx === -1) return;
     this.waiters.splice(idx, 1);
-    const err = new OrderProcessingError(
-      FailureCode.PoolTimeout,
-      `timeout acquiring connection after ${ACQUIRE_TIMEOUT_MS}ms ` +
-        `(pool ${this.inUse}/${POOL_SIZE} in use, ${this.waiters.length} waiting)`,
-      true,
+    const statement = waiter.statement ? `"${waiter.statement.slice(0, 80)}"` : 'a query';
+    const err = new PoolTimeoutError(
+      `Timed out after ${ACQUIRE_TIMEOUT_MS}ms waiting for a database connection ` +
+        `(${this.inUse}/${POOL_SIZE} in use, ${this.waiters.length} still queued) while running ${statement}`,
+      { inUse: this.inUse, size: POOL_SIZE, waiting: this.waiters.length, acquireTimeoutMs: ACQUIRE_TIMEOUT_MS, statement: waiter.statement },
     );
     log.error(
       {
@@ -139,7 +142,8 @@ export class DbPool {
         inUse: this.inUse,
         poolSize: POOL_SIZE,
         waiting: this.waiters.length,
-        err,
+        statement: waiter.statement,
+        ...errorFields(err),
       },
       err.message,
     );
@@ -166,8 +170,8 @@ export class DbPool {
       const heldMs = now - entry.since;
       if (heldMs < 60_000) continue;
       log.warn(
-        { event: 'connection_leak_detected', connectionId: id, heldMs },
-        `connection leak detected: connection #${id} held for ${heldMs}ms, forcibly reclaimed`,
+        { event: 'connection_leak_detected', connectionId: id, heldMs, statement: entry.statement },
+        `Connection leak detected: connection #${id} held for ${heldMs}ms by ${entry.statement ? `"${entry.statement.slice(0, 80)}"` : 'an unknown caller'} was never released; forcibly reclaimed`,
       );
       this.checkedOut.delete(id);
       this.inUse--;
@@ -195,7 +199,7 @@ export class DbPool {
         poolSize: POOL_SIZE,
         waiting: this.waiters.length,
       },
-      `connection pool under pressure: ${this.inUse}/${POOL_SIZE} in use, ${this.waiters.length} waiting`,
+      `Database connection pool under pressure: ${this.inUse}/${POOL_SIZE} connections in use, ${this.waiters.length} callers waiting`,
     );
   }
 

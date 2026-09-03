@@ -4,8 +4,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { createLogger } from '../common/logger';
-import { newOrderId } from '../common/ids';
+import { createLogger, orderLogger } from '../common/logger';
+import { newOrderId, newTraceId } from '../common/ids';
 import { FailureCode, OrderProcessingError } from '../domain/failure-codes';
 import { Order, OrderChannel, OrderState, TERMINAL_STATES } from '../domain/order.entity';
 import { CatalogService } from '../catalog/catalog.service';
@@ -47,10 +47,10 @@ export class OrdersService {
     private readonly inventory: InventoryService,
   ) {}
 
-  async createOrder(dto: CreateOrderDto, idempotencyKey?: string): Promise<Order> {
-    const order = this.buildOrder(dto);
+  async createOrder(dto: CreateOrderDto, idempotencyKey?: string, traceId?: string): Promise<Order> {
+    const order = this.buildOrder(dto, traceId);
     order.idempotencyKey = idempotencyKey;
-    log.info(
+    orderLogger(log, order).info(
       {
         event: 'order_received',
         orderId: order.id,
@@ -59,7 +59,7 @@ export class OrdersService {
         promoCode: order.promoCode,
         idempotencyKey,
       },
-      `Order ${order.id} received from ${order.customerId}`,
+      `Order ${order.id} received from ${order.customerName} (${order.customerId}) via ${order.channel} app ${order.appVersion}: ${order.lines.length} line(s)${order.promoCode ? ` with promo ${order.promoCode}` : ''}, ship to ${order.shippingAddress.city}, ${order.shippingAddress.country}`,
     );
 
     if (idempotencyKey) {
@@ -154,10 +154,11 @@ export class OrdersService {
     return this.repository.activeCount();
   }
 
-  private buildOrder(dto: CreateOrderDto): Order {
+  private buildOrder(dto: CreateOrderDto, traceId?: string): Order {
     const now = new Date();
     return {
       id: newOrderId(),
+      traceId: traceId || newTraceId(),
       customerId: dto.customerId,
       customerName: dto.customerName || 'Guest Customer',
       b2b: !!dto.b2b,

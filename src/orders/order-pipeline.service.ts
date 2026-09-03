@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { createLogger } from '../common/logger';
+import { AppLogger, createLogger, errorFields, orderLogger } from '../common/logger';
 import { FailureCode, OrderProcessingError } from '../domain/failure-codes';
 import { Order, OrderState, TERMINAL_STATES } from '../domain/order.entity';
 import { assertTransition, canTransition } from '../domain/order-state.machine';
@@ -61,6 +61,18 @@ export class OrderPipelineService {
     private readonly shipping: ShippingService,
   ) {}
 
+  private readonly loggers = new WeakMap<Order, AppLogger>();
+
+  /** The order's own logger: every hop shares orderId, customer, channel and trace. */
+  private logFor(order: Order): AppLogger {
+    let logger = this.loggers.get(order);
+    if (!logger) {
+      logger = orderLogger(log, order);
+      this.loggers.set(order, logger);
+    }
+    return logger;
+  }
+
   submit(order: Order): void {
     this.queue(order, () => this.validateStep(order));
   }
@@ -85,7 +97,7 @@ export class OrderPipelineService {
     order.updatedAt = new Date();
     order.history.push({ from: prev, to, at: order.updatedAt, reason });
     this.repository.save(order);
-    log.info(
+    this.logFor(order).info(
       {
         event: 'order_state_changed',
         orderId: order.id,
@@ -100,7 +112,7 @@ export class OrderPipelineService {
         cardBin: order.cardBin,
         issuer: order.issuer,
       },
-      `Order ${order.id} ${prev} -> ${to}`,
+      `Order ${order.id} for ${order.customerId} (${order.channel}, app ${order.appVersion}) moved ${prev} -> ${to}${reason ? `: ${reason}` : ''}${order.total ? ` · ${order.currency} ${order.total.toFixed(2)}` : ''} after ${Date.now() - stepStartedAt}ms`,
     );
   }
 
@@ -109,7 +121,7 @@ export class OrderPipelineService {
     await sleep(20 + Math.random() * 80);
 
     if (!order.shippingAddress?.zip) {
-      log.warn(
+      this.logFor(order).warn(
         {
           event: 'order_rejected',
           errorCode: FailureCode.MissingShippingZip,
@@ -125,7 +137,7 @@ export class OrderPipelineService {
     }
 
     if (isCustomerBlocked(order.customerId)) {
-      log.warn(
+      this.logFor(order).warn(
         {
           event: 'order_rejected',
           errorCode: FailureCode.CustomerBlocked,
@@ -142,7 +154,7 @@ export class OrderPipelineService {
 
     for (const line of order.lines) {
       if (!SkuValidator.isValid(line.sku) || !this.catalog.getProduct(line.sku)) {
-        log.warn(
+        this.logFor(order).warn(
           {
             event: 'order_rejected',
             errorCode: FailureCode.InvalidSku,
@@ -170,7 +182,7 @@ export class OrderPipelineService {
       this.queue(order, () => this.authorizeStep(order));
     } catch (err) {
       if (err instanceof OrderProcessingError && err.code === FailureCode.PromoExpired) {
-        log.warn(
+        this.logFor(order).warn(
           {
             event: 'promo_rejected',
             errorCode: FailureCode.PromoExpired,
@@ -199,16 +211,16 @@ export class OrderPipelineService {
   }
 
   private async recoverFromPricingFailure(order: Order, err: TypeError, started: number): Promise<void> {
-    log.error(
+    this.logFor(order).error(
       {
         event: 'pricing_failure',
         errorCode: FailureCode.PricingFailure,
         orderId: order.id,
         customerId: order.customerId,
         promoCode: order.promoCode,
-        err,
+        ...errorFields(err),
       },
-      `Unhandled error pricing order ${order.id} with promo ${order.promoCode}`,
+      `Pricing crashed for order ${order.id} while applying promo ${order.promoCode}: ${(err as Error).name}: ${(err as Error).message}; repricing without the promo`,
     );
     // The state machine only reaches PRICING_FAILED via PRICED, so record
     // that the order entered the pricing stage before flagging the failure.
@@ -224,7 +236,7 @@ export class OrderPipelineService {
       this.transition(order, OrderState.Priced, retryStarted, `repriced without promo ${promo}`);
       this.queue(order, () => this.authorizeStep(order));
     } catch (retryErr) {
-      log.warn(
+      this.logFor(order).warn(
         {
           event: 'order_rejected',
           errorCode: FailureCode.PricingFailure,
@@ -253,7 +265,7 @@ export class OrderPipelineService {
         (err.code === FailureCode.PaymentDeclined || err.code === FailureCode.CreditLimit)
       ) {
         if (order.paymentAttempts >= PAYMENT_MAX_DECLINE_ATTEMPTS) {
-          log.warn(
+          this.logFor(order).warn(
             {
               event: 'payment_declined',
               errorCode: err.code,
@@ -271,7 +283,7 @@ export class OrderPipelineService {
           this.transition(order, OrderState.PaymentDeclined, started, err.message);
           return;
         }
-        log.info(
+        this.logFor(order).info(
           {
             event: 'payment_retry_scheduled',
             errorCode: err.code,
@@ -286,7 +298,7 @@ export class OrderPipelineService {
       }
       if (err instanceof OrderProcessingError && GATEWAY_FAILURE_CODES.has(err.code)) {
         if (order.paymentAttempts > GATEWAY_MAX_RETRIES) {
-          log.error(
+          this.logFor(order).error(
             {
               event: 'order_processing_failed',
               errorCode: err.code,
@@ -294,12 +306,12 @@ export class OrderPipelineService {
               customerId: order.customerId,
               amount: order.total,
               attempts: order.paymentAttempts,
-              err,
+              ...errorFields(err),
             },
-            `Payment authorization failed for order ${order.id} after ${order.paymentAttempts} attempts`,
+            `Payment authorization for order ${order.id} (${order.currency} ${order.total}) abandoned after ${order.paymentAttempts} gateway attempts: ${(err as Error).message}`,
           );
           this.transition(order, OrderState.Failed, started, err.message);
-          log.error(
+          this.logFor(order).error(
             {
               event: 'order_dead_lettered',
               errorCode: err.code,
@@ -315,7 +327,7 @@ export class OrderPipelineService {
         const backoffMs = Math.round(
           GATEWAY_BACKOFF_BASE_MS * Math.pow(2, order.paymentAttempts - 1) + Math.random() * 1_000,
         );
-        log.warn(
+        this.logFor(order).warn(
           {
             event: 'payment_gateway_retry',
             errorCode: err.code,
@@ -338,7 +350,7 @@ export class OrderPipelineService {
     const score = await this.fraud.score(order);
     order.fraudScore = score;
     if (score > FRAUD_HOLD_THRESHOLD) {
-      log.warn(
+      this.logFor(order).warn(
         {
           event: 'fraud_hold',
           errorCode: FailureCode.FraudHold,
@@ -363,7 +375,7 @@ export class OrderPipelineService {
     const started = Date.now();
     const outcome = await this.fraud.releaseHold(order);
     if (outcome === 'released') {
-      log.info(
+      this.logFor(order).info(
         {
           event: 'fraud_hold_released',
           orderId: order.id,
@@ -376,7 +388,7 @@ export class OrderPipelineService {
       this.queue(order, () => this.allocateStep(order));
       return;
     }
-    log.warn(
+    this.logFor(order).warn(
       {
         event: 'fraud_hold_cancelled',
         errorCode: FailureCode.FraudHold,
@@ -400,7 +412,7 @@ export class OrderPipelineService {
     } catch (err) {
       if (err instanceof OrderProcessingError && err.code === FailureCode.InsufficientStock && err.retryable) {
         if (order.allocationAttempts >= BACKORDER_MAX_ATTEMPTS) {
-          log.error(
+          this.logFor(order).error(
             {
               event: 'backorder_expired',
               errorCode: FailureCode.InsufficientStock,
@@ -416,7 +428,7 @@ export class OrderPipelineService {
           return;
         }
         if (order.state !== OrderState.Backordered) {
-          log.warn(
+          this.logFor(order).warn(
             {
               event: 'order_backordered',
               errorCode: FailureCode.InsufficientStock,
@@ -432,7 +444,7 @@ export class OrderPipelineService {
           );
           this.transition(order, OrderState.Backordered, started, err.message);
         } else {
-          log.warn(
+          this.logFor(order).warn(
             {
               event: 'backorder_retry_failed',
               errorCode: FailureCode.InsufficientStock,
@@ -479,7 +491,7 @@ export class OrderPipelineService {
       this.scheduleCaptureConfirmation(order);
       return;
     }
-    log.info(
+    this.logFor(order).info(
       {
         event: 'capture_confirmation_recovered',
         orderId: order.id,
@@ -501,7 +513,7 @@ export class OrderPipelineService {
         // amounts; align the authorization with the order total and move on.
         order.authorizedAmount = order.total;
         this.repository.save(order);
-        log.info(
+        this.logFor(order).info(
           {
             event: 'amount_mismatch_reconciled',
             orderId: order.id,
@@ -522,7 +534,7 @@ export class OrderPipelineService {
   private scheduleCaptureConfirmation(order: Order): void {
     order.captureAttempts += 1;
     if (order.captureAttempts >= CAPTURE_CONFIRM_MAX_ATTEMPTS) {
-      log.error(
+      this.logFor(order).error(
         {
           event: 'order_processing_failed',
           errorCode: FailureCode.PaymentConfirmationTimeout,
@@ -535,7 +547,7 @@ export class OrderPipelineService {
         `Capture confirmation never arrived for order ${order.id} after ${order.captureAttempts} attempts`,
       );
       this.transition(order, OrderState.Failed, Date.now(), 'payment capture confirmation timed out');
-      log.error(
+      this.logFor(order).error(
         {
           event: 'order_dead_lettered',
           errorCode: FailureCode.PaymentConfirmationTimeout,
@@ -548,7 +560,7 @@ export class OrderPipelineService {
       );
       return;
     }
-    log.debug(
+    this.logFor(order).debug(
       {
         event: 'capture_confirmation_pending',
         orderId: order.id,
@@ -571,7 +583,7 @@ export class OrderPipelineService {
       this.queue(order, () => this.deliverStep(order));
     } catch (err) {
       if (err instanceof OrderProcessingError && err.code === FailureCode.NoCarrier) {
-        log.warn(
+        this.logFor(order).warn(
           {
             event: 'shipment_rejected',
             errorCode: FailureCode.NoCarrier,
@@ -592,7 +604,7 @@ export class OrderPipelineService {
     const started = Date.now();
     await sleep(50 + Math.random() * 150);
     this.transition(order, OrderState.Delivered, started);
-    log.info(
+    this.logFor(order).info(
       {
         event: 'order_delivered',
         orderId: order.id,
@@ -606,7 +618,7 @@ export class OrderPipelineService {
 
   private deadLetter(order: Order, err: unknown): void {
     const cause = err instanceof Error ? err : new Error(String(err));
-    log.error(
+    this.logFor(order).error(
       {
         event: 'order_processing_failed',
         errorCode: cause instanceof OrderProcessingError ? cause.code : undefined,
@@ -632,7 +644,7 @@ export class OrderPipelineService {
     order.updatedAt = new Date();
     order.history.push({ from: prev, to: OrderState.Failed, at: order.updatedAt, reason: cause.message });
     this.repository.save(order);
-    log.info(
+    this.logFor(order).info(
       {
         event: 'order_state_changed',
         orderId: order.id,

@@ -1,3 +1,4 @@
+import { traceIdFromHeaders } from '../common/ids';
 import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { CreateOrderDto, OrdersService } from './orders.service';
 
@@ -6,8 +7,12 @@ export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
   @Post('orders')
-  createOrder(@Body() dto: CreateOrderDto, @Headers('idempotency-key') idempotencyKey?: string) {
-    return this.orders.createOrder(dto, idempotencyKey);
+  createOrder(
+    @Body() dto: CreateOrderDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers() headers: Record<string, unknown> = {},
+  ) {
+    return this.orders.createOrder(dto, idempotencyKey, traceIdFromHeaders(headers));
   }
 
   @Get('orders/:id/tracking')

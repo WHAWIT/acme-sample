@@ -7,11 +7,11 @@ import { OrderGeneratorService } from './order-generator.service';
 
 const log = createLogger('order-service');
 
-const SNAPSHOT_INTERVAL_MS = 30_000;
+const SNAPSHOT_INTERVAL_MS = 60_000;
 const MB = 1_048_576;
 
 /**
- * Periodic process/pool/cache gauge dump. One INFO line every 30s keeps
+ * Periodic process/pool/cache gauge dump. One INFO line every 60s keeps
  * dashboards fed without a metrics agent.
  */
 @Injectable()

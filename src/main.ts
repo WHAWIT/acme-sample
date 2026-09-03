@@ -4,6 +4,8 @@ import { AppModule } from './app.module';
 import { LoggingInterceptor } from './common/logging.interceptor';
 import { createLogger } from './common/logger';
 import { runtimeState } from './common/runtime-state';
+import { reportDeployment } from './common/change-reporter';
+import { runtimeContext } from './common/logger';
 
 const log = createLogger('order-service');
 
@@ -15,8 +17,13 @@ async function bootstrap() {
   await app.listen(port);
   log.info(
     { event: 'service_started', port, version: runtimeState.version },
-    `ACME order service listening on :${port} (v${runtimeState.version})`,
+    `ACME order service listening on :${port} (v${runtimeState.version}, revision ${runtimeContext.revision}, commit ${runtimeContext.commitSha.slice(0, 7)})`,
   );
+  await reportDeployment({
+    sha: runtimeContext.commitSha,
+    version: runtimeState.version,
+    description: `Deployed acme-orders ${runtimeState.version} to Cloud Run (${runtimeContext.revision})`,
+  });
 }
 
 bootstrap().catch((err) => {
