@@ -9,6 +9,7 @@ import { ReportsModule } from './reports/reports.module';
 import { AdminModule } from './admin/admin.module';
 import { SimulationModule } from './simulation/simulation.module';
 import { HealthController } from './health/health.controller';
+import { AcmeMcpModule } from './mcp/acme-mcp.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { HealthController } from './health/health.controller';
     ReportsModule,
     AdminModule,
     SimulationModule,
+    AcmeMcpModule,
   ],
   controllers: [HealthController],
 })
