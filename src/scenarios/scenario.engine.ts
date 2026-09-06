@@ -64,7 +64,9 @@ export class ScenarioEngine {
       setTimeout(() => this.stop(name, 'expired'), durationMinutes * 60_000),
     );
     def.onStart?.(intensity);
-    log.info({ event: 'scenario_started', scenario: name, intensity, durationMinutes }, `Scenario ${name} started (${intensity}, ${durationMinutes}m)`);
+    // DEBUG on purpose: the fault injector is stage machinery, not something the
+    // service under observation would ever say about itself.
+    log.debug({ event: 'scenario_started', scenario: name, intensity, durationMinutes }, `Scenario ${name} started (${intensity}, ${durationMinutes}m)`);
     return activation;
   }
 
@@ -76,7 +78,7 @@ export class ScenarioEngine {
     if (wasActive) {
       this.definitions.get(name)?.onStop?.(reason);
       if (!quiet) {
-        log.info({ event: 'scenario_stopped', scenario: name, reason }, `Scenario ${name} ${reason}`);
+        log.debug({ event: 'scenario_stopped', scenario: name, reason }, `Scenario ${name} ${reason}`);
       }
     }
     return wasActive;
