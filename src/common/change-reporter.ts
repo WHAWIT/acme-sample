@@ -35,6 +35,9 @@ export async function reportDeployment(report: DeploymentReport): Promise<void> 
       environment,
       task: 'deploy',
       description: report.description,
+      // Free-form deployment payload, as GitHub passes it through: names the service so
+      // Whawit's blast window can match the change to the incident's service.
+      payload: { service: 'acme-orders', version: report.version },
       created_at: now,
     },
     deployment_status: {
