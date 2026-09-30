@@ -48,7 +48,9 @@ export class DiscountService {
     const promo = this.getPromotion(order.promoCode);
     if (!promo) return 0;
     this.assertNotExpired(promo);
-    const tier = promo.rules.tiers.find((t) => subtotal >= t.minSubtotal) ?? promo.rules.tiers[0];
+    // Campaign codes may ship without tier rules; they discount at their flat percentOff.
+    const tiers = promo.rules?.tiers ?? [{ minSubtotal: 0, rate: promo.percentOff / 100 }];
+    const tier = tiers.find((t) => subtotal >= t.minSubtotal) ?? tiers[0];
     const discount = Number((subtotal * tier.rate).toFixed(2));
     log.info(
       { event: 'promo_applied', orderId: order.id, promoCode: promo.code, rate: tier.rate, discount },
